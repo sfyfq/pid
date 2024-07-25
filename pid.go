@@ -159,6 +159,10 @@ func (p *PID) DisableLog() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.logFilename = ""
+	if p.logFile != nil {
+		p.logFile.Close()
+		p.logFile = nil
+	}
 }
 
 // SetOutputLimits sets lower and upper bounds on the control variable.
@@ -200,6 +204,7 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 		logFile, err := os.OpenFile(p.logFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
 			p.logger = log.New(logFile, "", 0)
+			p.logFile = logFile
 		}
 	}
 
@@ -235,6 +240,7 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 				p.logger.Printf("the PID loop has stopped and took %f seconds", elapsed)
 				p.logFile.Close()
 				p.logFile = nil
+				p.logger = nil
 			}
 			if timeoutTimer != nil && !timeoutTimer.Stop() {
 				<-timeoutTimer.C
@@ -262,7 +268,7 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 				p.actionFunc(newControlValue)
 				p.movingAverage.AddValue(math.Abs(newValue - p.setpoint))
 				if p.logger != nil {
-					p.logger.Println(elapsedTime.Seconds(), newValue, newControlValue, p.kp, p.ki, p.kd, p.proportional, p.integral, p.derivative)
+					p.logger.Printf("%f,%f,%f,%f,%f,%f,%f,%f,%f", elapsedTime.Seconds(), newValue, newControlValue, p.kp, p.ki, p.kd, p.proportional, p.integral, p.derivative)
 				}
 				if p.isStabilzied() {
 					if oneshot {
@@ -352,9 +358,6 @@ func (p *PID) compute(newValue float64, deltaTime time.Duration) float64 {
 	e := p.setpoint - newValue
 	if math.Signbit(e) != math.Signbit(p.lastError) {
 		p.errorReversed = true
-		if p.logger != nil {
-			p.logger.Println("error reversed")
-		}
 	}
 	var d_error float64
 

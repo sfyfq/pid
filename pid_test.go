@@ -57,7 +57,7 @@ func TestPID(t *testing.T) {
 	pid.EnableLog("waterboiler.log")
 	pid.SetOutputLimits(0, 1800)
 	stopped := pid.Start(80, 30, 1, false)
-
+	time.AfterFunc(60*time.Second, pid.DisableLog)
 	time.AfterFunc(120*time.Second, pid.Stop)
 
 	for range stopped {
