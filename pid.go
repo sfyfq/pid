@@ -456,15 +456,10 @@ func clamp(in float64, limits OutputLimit) (out float64) {
 // isStabilzied encapsulate the algorithm to determine whether the input variable has stabilized.
 func (p *PID) isStabilzied() bool {
 	if p.movingAverage.Mean() <= math.Abs(p.absTol) {
-		if !p.errorReversed {
-			return false
-		} else {
-
-			return true
-		}
+		return true
 
 	} else {
-		p.errorReversed = false
+
 		return false
 	}
 
