@@ -329,8 +329,6 @@ func (p *PID) GetTuning() (Kp, Ki, Kd float64) {
 
 // SetTuning sets the tuning constants. It panics if any one of them is negative
 func (p *PID) SetTuning(Kp, Ki, Kd float64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if Kp < 0 {
 		panic("Kp is negative")
 	}
@@ -340,10 +338,47 @@ func (p *PID) SetTuning(Kp, Ki, Kd float64) {
 	if Kd < 0 {
 		panic("Kd is negative")
 	}
-
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.kp, p.ki, p.kd = Kp, Ki, Kd
 	if p.logger != nil {
 		p.logger.Printf("new tuning parameters Kp=%f, Ki=%f, Kd=%f", Kp, Ki, Kd)
+	}
+}
+
+func (p *PID) SetKp(v float64) {
+	if v < 0 {
+		panic("Kp is negative")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.kp = v
+	if p.logger != nil {
+		p.logger.Printf("Kp set to %f", v)
+	}
+}
+
+func (p *PID) SetKi(v float64) {
+	if v < 0 {
+		panic("Ki is negative")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ki = v
+	if p.logger != nil {
+		p.logger.Printf("Ki set to %f", v)
+	}
+}
+
+func (p *PID) SetKd(v float64) {
+	if v < 0 {
+		panic("Kd is negative")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.kd = v
+	if p.logger != nil {
+		p.logger.Printf("Kd set to %f", v)
 	}
 }
 
