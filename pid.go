@@ -88,7 +88,7 @@ type PID struct {
 	pidLogging
 	pidTarget
 	limits                             OutputLimit
-	last_time                          time.Time
+	lastTime                           time.Time
 	interval                           time.Duration
 	ticker                             time.Ticker
 	sampleFunc                         func() float64
@@ -254,9 +254,9 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 				return
 			case now := <-p.ticker.C:
 				newValue := p.sampleFunc()
-				deltaTime := now.Sub(p.last_time)
+				deltaTime := now.Sub(p.lastTime)
 				elapsedTime := now.Sub(p.startTime)
-				p.last_time = now
+				p.lastTime = now
 				p.lastInput = newValue
 				newControlValue := p.compute(newValue, deltaTime)
 				p.actionFunc(newControlValue)
@@ -398,7 +398,7 @@ func (p *PID) Reset() {
 	p.lastOutput = math.NaN()
 	p.lastError = math.NaN()
 	p.lastInput = math.NaN()
-	p.last_time = time.Now()
+	p.lastTime = time.Now()
 }
 
 // clamp applies limits on the output value

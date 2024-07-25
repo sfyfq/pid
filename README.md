@@ -27,7 +27,7 @@ Using a PID for a waterboiler as an example.
 
 Three function calls are needed to create and run a PID controller.
 
-First, create a new PID controller instance by calling `NewPID(Kp, Kd, Ki, interval_s, sample_func, action_func, error_map)`
+First, create a new PID controller instance by calling `NewPID(Kp, Kd, Ki, intervalSecond, sampleFunc, actionFunc, errorMap)`
 
 ```go
 pid,err:= NewPID(
