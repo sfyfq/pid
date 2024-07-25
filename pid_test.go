@@ -1,6 +1,7 @@
 package pid
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func (w *WaterBoiler) SetPower(power float64) {
 
 func TestPID(t *testing.T) {
 	boiler := WaterBoiler{
-		temp:        55,
+		temp:        77,
 		power:       0,
 		volume:      1,
 		dissipation: 0.01,
@@ -40,7 +41,7 @@ func TestPID(t *testing.T) {
 		speedup:     1,
 	}
 
-	pid, err := NewPID(100, 0.2, 0.1, 1,
+	pid, err := NewPID(300, 2, 1, 1,
 		func() float64 {
 			waterTemp := boiler.GetTemperature()
 			return waterTemp
@@ -55,6 +56,12 @@ func TestPID(t *testing.T) {
 
 	pid.EnableLog("waterboiler.log")
 	pid.SetOutputLimits(0, 1800)
-	stopped := pid.Start(80, 30, 1)
-	<-stopped
+	stopped := pid.Start(80, 30, 1, false)
+
+	time.AfterFunc(120*time.Second, pid.Stop)
+
+	for range stopped {
+		fmt.Println("stablization reached")
+	}
+	fmt.Println("The PID has stopped")
 }

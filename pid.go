@@ -5,7 +5,6 @@ package pid
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	"os"
@@ -35,7 +34,6 @@ func NewLSArray(size int) *LSArray {
 func (l *LSArray) Resize(size int) {
 	if size > len(l.array) {
 		l.array = make([]float64, size)
-		fmt.Printf("array resized to %d", size)
 	}
 	l.Reset()
 }
@@ -54,12 +52,29 @@ func (l *LSArray) AddValue(v float64) {
 	l.array[l.head] = v
 }
 
-func (l *LSArray) Average() float64 {
+func (l *LSArray) Mean() float64 {
 	sum := 0.0
 	for _, v := range l.array {
 		sum += v
 	}
 	return sum / float64(len(l.array))
+}
+
+func (l *LSArray) Var() float64 {
+	variance := 0.0
+	mean := l.Mean()
+	for _, value := range l.array {
+		variance += (value - mean) * (value - mean)
+	}
+	return variance / float64(len(l.array))
+}
+
+type pidTarget struct {
+	movingAverage *LSArray
+	setpoint      float64
+	absTol        float64
+	errorReversed bool
+	stabilized    bool
 }
 
 type pidLogging struct {
@@ -70,54 +85,53 @@ type pidLogging struct {
 
 // PID represents a simple PID controller
 type PID struct {
-	kp, ki, kd                          float64
-	setpoint                            float64
-	limits                              OutputLimit
-	last_time                           time.Time
-	interval_s                          float64
-	ticker                              time.Ticker
-	sample_func                         func() float64
-	action_func                         func(float64)
-	error_map                           func(float64) float64
-	proportional, integral, derivative  float64
-	last_output, last_error, last_input float64
-	cancel                              chan struct{}
-	movingAverage                       LSArray
-	done                                chan struct{}
-	startTime                           time.Time
-	mu                                  sync.Mutex
-
 	pidLogging
+	pidTarget
+	limits                             OutputLimit
+	last_time                          time.Time
+	interval                           time.Duration
+	ticker                             time.Ticker
+	sampleFunc                         func() float64
+	actionFunc                         func(float64)
+	errorMap                           func(float64) float64
+	kp, ki, kd                         float64
+	proportional, integral, derivative float64
+	lastOutput, lastError, lastInput   float64
+	cancel                             chan struct{}
+	trigger                            chan struct{}
+	startTime                          time.Time
+	mu                                 sync.Mutex
 }
-
-// NewPID initialize a new PID controller
 
 var OUTPUT_LIMIT_NONE = math.MaxFloat64
 
+// NewPID initialize a new PID controller
 func NewPID(
 	Kp, Ki, Kd float64,
-	interval_s float64,
-	sample_func func() float64,
-	action_func func(float64),
-	error_map func(float64) float64,
+	intervalSecond float64,
+	sampleFunc func() float64,
+	actionFunc func(float64),
+	errorMap func(float64) float64,
 
 ) (*PID, error) {
-	if sample_func == nil || action_func == nil {
+	if sampleFunc == nil || actionFunc == nil {
 		return nil, errors.New("both sample_func and action_func must be provided")
 	}
 	pid := &PID{
-		kp:         Kp,
-		ki:         Ki,
-		kd:         Kd,
-		interval_s: interval_s,
+		kp:       Kp,
+		ki:       Ki,
+		kd:       Kd,
+		interval: time.Duration(float64(time.Second) * intervalSecond),
 		limits: OutputLimit{
 			lower: -OUTPUT_LIMIT_NONE,
 			upper: OUTPUT_LIMIT_NONE},
-		sample_func:   sample_func,
-		action_func:   action_func,
-		error_map:     error_map,
-		movingAverage: *NewLSArray(10),
-		ticker:        *time.NewTicker(time.Duration(float64(time.Second) * interval_s)),
+		sampleFunc: sampleFunc,
+		actionFunc: actionFunc,
+		errorMap:   errorMap,
+		ticker:     *time.NewTicker(time.Duration(float64(time.Second) * intervalSecond)),
+		pidTarget: pidTarget{
+			movingAverage: NewLSArray(10),
+		},
 	}
 
 	pid.ticker.Stop()
@@ -126,6 +140,7 @@ func NewPID(
 	return pid, nil
 }
 
+// EnableLog enables logging to a file. Logging is started automatically by Start() and stops when the loop finishes.
 func (p *PID) EnableLog(logFilename string) error {
 	logFile, err := os.OpenFile(logFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -139,6 +154,7 @@ func (p *PID) EnableLog(logFilename string) error {
 
 }
 
+// DisableLog disables file logging.
 func (p *PID) DisableLog() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -178,7 +194,7 @@ func (p *PID) SetOutputLimits(lower, upper float64) {
 // Starts the PID loop control for `stableForSeconds` seconds and stops the loop
 // automatically when the moving average error within the last `stableForSeconds` seconds is no greater than absTol. An optional timeout can be supplied to stop the PID after a certain time period.
 // It returns a channel that is closed when the PID is stopped.
-func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, timeout ...time.Duration) <-chan struct{} {
+func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, oneshot bool, timeout ...time.Duration) (trigger <-chan struct{}) {
 	p.Stop() // make sure at most one active PID control loop at all time.
 	if p.logFilename != "" {
 		logFile, err := os.OpenFile(p.logFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -192,13 +208,15 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	p.setpoint = setpoint
-	if p.logger != nil {
-		p.logger.Printf("Setpoint set to %f", setpoint)
-	}
-	p.cancel = make(chan struct{})
-	p.done = make(chan struct{})
-	size := int(math.Min(1024, math.Max(1, math.Ceil(stableForSeconds/p.interval_s))))
+	p.absTol = absTol
+	p.stabilized = false
+	p.errorReversed = false
+
+	p.cancel = make(chan struct{}, 1)
+	p.trigger = make(chan struct{}, 1)
+	size := int(math.Min(1024, math.Max(1, math.Ceil(stableForSeconds/p.interval.Seconds()))))
 	p.movingAverage.Resize(size)
 
 	// set up timeout timer if specified and restart the sampling ticker
@@ -208,7 +226,7 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 		timeoutTimer = time.NewTimer(timeout[0])
 		timeoutChan = timeoutTimer.C
 	}
-	p.ticker.Reset(time.Duration(float64(time.Second) * p.interval_s))
+	p.ticker.Reset(p.interval)
 
 	go func() {
 		defer func() {
@@ -222,7 +240,8 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 				<-timeoutTimer.C
 			}
 			p.ticker.Stop()
-			close(p.done)
+			close(p.trigger)
+			p.cancel = nil
 		}()
 		if p.logger != nil {
 			p.logger.Printf("PID regulation started...")
@@ -234,26 +253,36 @@ func (p *PID) Start(setpoint float64, stableForSeconds float64, absTol float64, 
 			case <-timeoutChan:
 				return
 			case now := <-p.ticker.C:
-				newValue := p.sample_func()
+				newValue := p.sampleFunc()
 				deltaTime := now.Sub(p.last_time)
 				elapsedTime := now.Sub(p.startTime)
 				p.last_time = now
-				p.last_input = newValue
+				p.lastInput = newValue
 				newControlValue := p.compute(newValue, deltaTime)
-				p.action_func(newControlValue)
+				p.actionFunc(newControlValue)
 				p.movingAverage.AddValue(math.Abs(newValue - p.setpoint))
 				if p.logger != nil {
 					p.logger.Println(elapsedTime.Seconds(), newValue, newControlValue, p.kp, p.ki, p.kd, p.proportional, p.integral, p.derivative)
 				}
-				if p.movingAverage.Average() <= math.Abs(absTol) {
-					return
+				if p.isStabilzied() {
+					if oneshot {
+						return
+					} else if !p.stabilized {
+						p.stabilized = true
+						select {
+						case p.trigger <- struct{}{}:
+						default:
+						}
+					}
+				} else {
+					p.stabilized = false
 				}
 			case <-p.cancel:
 				return
 			}
 		}
 	}()
-	return p.done
+	return p.trigger
 }
 
 // Stops the PID loop control
@@ -262,15 +291,27 @@ func (p *PID) Stop() {
 	defer p.mu.Unlock()
 	if p.cancel != nil {
 		close(p.cancel)
-		p.cancel = nil
 		if p.logger != nil {
-			p.logger.Printf("the PID loop was canceled")
+			p.logger.Printf("received signal to cancel the PID loop")
 		}
 	}
-	if p.done != nil {
-		<-p.done // wait for the goroutine to complete
-	}
+}
 
+// GetSetpoint returns the current setpoint
+func (p *PID) GetSetpoint() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.setpoint
+}
+
+// SetSetpoint sets a new setpoint
+func (p *PID) SetSetpoint(newValue float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.logger != nil {
+		p.logger.Printf("new setpoint %f", newValue)
+	}
+	p.setpoint = newValue
 }
 
 // GetTuning returns the tuning constants
@@ -295,6 +336,9 @@ func (p *PID) SetTuning(Kp, Ki, Kd float64) {
 	}
 
 	p.kp, p.ki, p.kd = Kp, Ki, Kd
+	if p.logger != nil {
+		p.logger.Printf("new tuning parameters Kp=%f, Ki=%f, Kd=%f", Kp, Ki, Kd)
+	}
 }
 
 // compute calculates internal states based on the new input value and the elapsed time since the sample point
@@ -306,17 +350,24 @@ func (p *PID) compute(newValue float64, deltaTime time.Duration) float64 {
 	dt = math.Max(dt, 1e-16)
 	// compute error terms
 	e := p.setpoint - newValue
+	if math.Signbit(e) != math.Signbit(p.lastError) {
+		p.errorReversed = true
+		if p.logger != nil {
+			p.logger.Println("error reversed")
+		}
+	}
 	var d_error float64
 
-	if math.IsNaN(p.last_error) {
+	if math.IsNaN(p.lastError) {
 		d_error = e
 	} else {
-		d_error = e - p.last_error
+		d_error = e - p.lastError
+
 	}
 
 	// apply error transformation if needed
-	if p.error_map != nil {
-		d_error = p.error_map(d_error)
+	if p.errorMap != nil {
+		d_error = p.errorMap(d_error)
 	}
 
 	// compute the proportional term
@@ -331,8 +382,8 @@ func (p *PID) compute(newValue float64, deltaTime time.Duration) float64 {
 	controlValue := p.proportional + p.integral + p.derivative
 	controlValue = clamp(controlValue, p.limits)
 
-	p.last_output = controlValue
-	p.last_error = e
+	p.lastOutput = controlValue
+	p.lastError = e
 	return controlValue
 
 }
@@ -344,9 +395,9 @@ func (p *PID) Reset() {
 	p.proportional = 0
 	p.integral = 0
 	p.derivative = 0
-	p.last_output = math.NaN()
-	p.last_error = math.NaN()
-	p.last_input = math.NaN()
+	p.lastOutput = math.NaN()
+	p.lastError = math.NaN()
+	p.lastInput = math.NaN()
 	p.last_time = time.Now()
 }
 
@@ -362,4 +413,21 @@ func clamp(in float64, limits OutputLimit) (out float64) {
 		return limits.lower
 	}
 	return in
+}
+
+// isStabilzied encapsulate the algorithm to determine whether the input variable has stabilized.
+func (p *PID) isStabilzied() bool {
+	if p.movingAverage.Mean() <= math.Abs(p.absTol) {
+		if !p.errorReversed {
+			return false
+		} else {
+
+			return true
+		}
+
+	} else {
+		p.errorReversed = false
+		return false
+	}
+
 }
